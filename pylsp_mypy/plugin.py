@@ -280,7 +280,7 @@ def get_diagnostics(
     if dmypy:
         dmypy_status_file = settings.get("dmypy_status_file", ".dmypy.json")
 
-    args = ["--show-error-end", "--no-error-summary", "--no-pretty"]
+    args = ["--show-error-end", "--no-pretty"]
 
     global tmpFile
     if live_mode and not is_saved:
@@ -344,11 +344,12 @@ def get_diagnostics(
 
         dmypy_command: List[str] = get_cmd(settings, "dmypy")
 
+        dmypy_args = ["--status-file", dmypy_status_file]
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
             completed_process = subprocess.run(
-                [*dmypy_command, "--status-file", dmypy_status_file, "status"],
+                [*dmypy_command,  *dmypy_args, "status"],
                 capture_output=True,
                 **windows_flag,
                 encoding="utf-8",
@@ -362,7 +363,7 @@ def get_diagnostics(
                     errors.strip(),
                 )
                 subprocess.run(
-                    ["dmypy", "--status-file", dmypy_status_file, "restart"],
+                    ["dmypy", *dmypy_args, "restart"],
                     capture_output=True,
                     **windows_flag,
                     encoding="utf-8",
@@ -371,19 +372,17 @@ def get_diagnostics(
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use dmypy via api
-            _, errors, exit_status = mypy_api.run_dmypy(
-                ["--status-file", dmypy_status_file, "status"]
-            )
+            _, errors, exit_status = mypy_api.run_dmypy([*dmypy_args, "status"])
             if exit_status != 0:
                 log.info(
                     "restarting dmypy from status: %s message: %s via api",
                     exit_status,
                     errors.strip(),
                 )
-                mypy_api.run_dmypy(["--status-file", dmypy_status_file, "restart"])
+                mypy_api.run_dmypy([*dmypy_args, "restart"])
 
         # run to use existing daemon or restart if required
-        args = ["--status-file", dmypy_status_file, "run", "--", *args]
+        args = [*dmypy_args, "run", "--", *args]
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
