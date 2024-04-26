@@ -96,7 +96,7 @@ Still users want this feature. For security reasons this is disabled by default.
 
 Using a ``pyproject.toml`` for configuration, which is in fact the preferred way, your configuration could look like this:
 
-::
+.. code-block:: toml
 
     [tool.pylsp-mypy]
     enabled = true
@@ -107,7 +107,7 @@ Using a ``pyproject.toml`` for configuration, which is in fact the preferred way
 A ``pyproject.toml`` does not conflict with the legacy config file (deprecated) given that it does not contain a ``pylsp-mypy`` section. The following explanation uses the syntax of the legacy config file (deprecated). However, all these options also apply to the ``pyproject.toml`` configuration (note the lowercase bools).
 Depending on your editor, the configuration (found in a file called ``pylsp-mypy.cfg`` in your workspace or a parent directory) should be roughly like this for a standard configuration:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -118,7 +118,7 @@ Depending on your editor, the configuration (found in a file called ``pylsp-mypy
 
 With ``dmypy`` enabled your config should look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -129,16 +129,16 @@ With ``dmypy`` enabled your config should look like this:
 
 With ``overrides`` specified (for example to tell mypy to use a different python than the currently active venv), your config could look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
-        "overrides": ["--python-executable", "/home/me/bin/python", True]
+        "overrides": ["--python-executable", "/home/me/bin/python"]
     }
 
 With ``dmypy_status_file`` your config could look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -150,7 +150,7 @@ With ``dmypy_status_file`` your config could look like this:
 
 With ``config_sub_paths`` your config could look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -159,7 +159,7 @@ With ``config_sub_paths`` your config could look like this:
 
 With ``report_progress`` your config could look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -168,7 +168,7 @@ With ``report_progress`` your config could look like this:
 
 With ``mypy_command`` your config could look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -177,7 +177,7 @@ With ``mypy_command`` your config could look like this:
 
 With ``dmypy_command`` your config could look like this:
 
-::
+.. code-block:: python
 
     {
         "enabled": True,
@@ -191,7 +191,7 @@ Developing
 
 Install development dependencies with (you might want to create a virtualenv first):
 
-::
+.. code-block:: sh
 
    pip install -r requirements.txt
 
@@ -203,7 +203,7 @@ The project uses two rst tests in order to assure uploadability to pypi: `rst-li
 
 This project uses `pre-commit`_ to enforce code-quality. After cloning the repository install the pre-commit hooks with:
 
-::
+.. code-block:: sh
 
    pre-commit install
 

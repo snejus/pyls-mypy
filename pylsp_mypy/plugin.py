@@ -126,18 +126,6 @@ def parse_line(line: str, document: Optional[Document] = None) -> Optional[Dict[
     return diag
 
 
-def apply_overrides(args: List[str], overrides: List[Any]) -> List[str]:
-    """Replace or combine default command-line options with overrides."""
-    overrides_iterator = iter(overrides)
-    if True not in overrides_iterator:
-        return overrides
-    # If True is in the list, the if above leaves the iterator at the element after True,
-    # therefore, the list below only contains the elements after the True
-    rest = list(overrides_iterator)
-    # slice of the True and the rest, add the args, add the rest
-    return overrides[: -(len(rest) + 1)] + args + rest
-
-
 def didSettingsChange(workspace: str, settings: Dict[str, Any]) -> None:
     """Handle relevant changes to the settings between runs."""
     configSubPaths = settings.get("config_sub_paths", [])
@@ -323,12 +311,11 @@ def get_diagnostics(
     if settings.get("strict", False):
         args.append("--strict")
 
-    overrides = settings.get("overrides", [True])
+    args.extend(settings.get("overrides", []))
     exit_status = 0
 
     if not dmypy:
-        args.extend(["--incremental", "--follow-imports", settings.get("follow-imports", "silent")])
-        args = apply_overrides(args, overrides)
+        args.extend(["--incremental", "--follow-imports", settings.get("follow-imports", "silent"), *args])
 
         mypy_command: List[str] = get_cmd(settings, "mypy")
 
@@ -396,7 +383,7 @@ def get_diagnostics(
                 mypy_api.run_dmypy(["--status-file", dmypy_status_file, "restart"])
 
         # run to use existing daemon or restart if required
-        args = ["--status-file", dmypy_status_file, "run", "--"] + apply_overrides(args, overrides)
+        args = ["--status-file", dmypy_status_file, "run", "--", *args]
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
