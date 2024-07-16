@@ -101,14 +101,19 @@ def parse_line(line: str, document: Optional[Document] = None) -> Optional[Dict[
             return None
 
     lineno = int(result["start_line"]) - 1  # 0-based line number
-    offset = int(result.get("start_col", 1)) - 1  # 0-based offset
-    end_lineno = int(result.get("end_line", lineno + 1)) - 1
-    end_offset = int(result.get("end_col", 1))  # end is exclusive
-
+    offset = int(result.get("start_col") or 1) - 1  # 0-based offset
+    end_lineno = int(result.get("end_line") or lineno + 1) - 1
+    end_offset = int(result.get("end_col") or 1)  # end is exclusive
+    code = result["code"]
     severity = result["severity"]
-    if severity not in ("error", "note"):
-        log.warning(f"invalid error severity '{severity}'")
-    errno = 1 if severity == "error" else 3
+    if code == "no-untyped-def":
+        return None
+
+    if code == "no-untyped-call":
+        severity = "warning"
+    elif code is None:
+        end_lineno = lineno
+        end_offset = offset + 1
 
     diag = {
         "source": "mypy",
@@ -117,7 +122,8 @@ def parse_line(line: str, document: Optional[Document] = None) -> Optional[Dict[
             "end": {"line": end_lineno, "character": end_offset},
         },
         "message": result["message"],
-        "severity": errno,
+        "severity": {"error": 1, "warning": 2, "note": 3}[severity],
+        "code": code,
     }
 
     if result["code"]:
@@ -322,7 +328,7 @@ def get_diagnostics(
         if mypy_command:
             # mypy exists on PATH or was provided by settings
             # -> use this mypy
-            log.info("executing mypy args = %s on path", args)
+            # log.info("executing mypy args = %s on path", args)
             completed_process = subprocess.run(
                 [*mypy_command, *args], capture_output=True, **windows_flag, encoding="utf-8"
             )
@@ -333,7 +339,7 @@ def get_diagnostics(
             # mypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use mypy via api
-            log.info("executing mypy args = %s via api", args)
+            # log.warning("executing mypy args = %s via api", args)
             report, errors, exit_status = mypy_api.run(args)
     else:
         # If dmypy daemon is non-responsive calls to run will block.
@@ -386,7 +392,7 @@ def get_diagnostics(
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
-            log.info("dmypy run args = %s via path", args)
+            # log.info("dmypy run args = %s via path", args)
             completed_process = subprocess.run(
                 [*dmypy_command, *args], capture_output=True, **windows_flag, encoding="utf-8"
             )
@@ -397,7 +403,7 @@ def get_diagnostics(
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use dmypy via api
-            log.info("dmypy run args = %s via api", args)
+            # log.info("dmypy run args = %s via api", args)
             report, errors, exit_status = mypy_api.run_dmypy(args)
 
     log.debug("report:\n%s", report)
