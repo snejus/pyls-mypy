@@ -6,6 +6,7 @@ Created on Fri Jul 10 09:53:57 2020
 
 @author: Richard Kellnberger
 """
+
 import ast
 import atexit
 import collections
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 from configparser import ConfigParser
+from functools import partial
 from pathlib import Path
 from typing import IO, Any, Dict, List, Optional
 
@@ -65,7 +67,9 @@ windows_flag: Dict[str, int] = (
 )
 
 
-def parse_line(line: str, document: Optional[Document] = None) -> Optional[Dict[str, Any]]:
+def parse_line(
+    line: str, document: Optional[Document] = None
+) -> Optional[Dict[str, Any]]:
     """
     Return a language-server diagnostic from a line of the Mypy error report.
 
@@ -105,11 +109,15 @@ def parse_line(line: str, document: Optional[Document] = None) -> Optional[Dict[
     end_lineno = int(result.get("end_line") or lineno + 1) - 1
     end_offset = int(result.get("end_col") or 1)  # end is exclusive
     code = result["code"]
-    severity = result["severity"]
-    if code == "no-untyped-def":
+    if not code and "Revealed" not in result["message"]:
         return None
 
-    if code == "no-untyped-call":
+    severity = result["severity"]
+    if code == "no-untyped-def":
+        severity = "note"
+    elif code in {"no-untyped-call", "no-untyped-def", "type-arg"}:
+        if "def test_" in line:
+            return None
         severity = "warning"
     elif code is None:
         end_lineno = lineno
@@ -153,7 +161,7 @@ def match_exclude_patterns(document_path: str, exclude_patterns: list) -> bool:
     for pattern in exclude_patterns:
         try:
             if re.search(pattern, document_path):
-                log.debug(f"{document_path} matches " f"exclude pattern '{pattern}'")
+                log.debug(f"{document_path} matches exclude pattern '{pattern}'")
                 return True
         except re.error as e:
             log.error(f"pattern {pattern} is not a valid regular expression: {e}")
@@ -230,9 +238,12 @@ def pylsp_lint(
     # exclude = ["tests/*"]
     exclude_patterns = settings.get("exclude", [])
 
-    if match_exclude_patterns(document_path=document.path, exclude_patterns=exclude_patterns):
+    if match_exclude_patterns(
+        document_path=document.path, exclude_patterns=exclude_patterns
+    ):
         log.debug(
-            f"Not running because {document.path} matches " f"exclude patterns '{exclude_patterns}'"
+            f"Not running because {document.path} matches "
+            f"exclude patterns '{exclude_patterns}'"
         )
         return []
 
@@ -320,18 +331,27 @@ def get_diagnostics(
     args.extend(settings.get("overrides", []))
     exit_status = 0
 
+    run_process = partial(
+        subprocess.run, capture_output=True, **windows_flag, encoding="utf-8"
+    )
+
     if not dmypy:
-        args.extend(["--incremental", "--follow-imports", settings.get("follow-imports", "silent"), *args])
+        args = [
+            "--incremental",
+            "--follow-imports",
+            settings.get("follow-imports", "silent"),
+            "--cache-fine-grained",
+            "--cache-dir=/home/sarunas/.cache/mypy",
+            *args,
+        ]
 
         mypy_command: List[str] = get_cmd(settings, "mypy")
 
         if mypy_command:
-            # mypy exists on PATH or was provided by settings
-            # -> use this mypy
-            # log.info("executing mypy args = %s on path", args)
-            completed_process = subprocess.run(
-                [*mypy_command, *args], capture_output=True, **windows_flag, encoding="utf-8"
-            )
+            # mypy exists on path
+            # -> use mypy on path
+            log.warning("executing mypy on path: %s", " ".join(args))
+            completed_process = run_process([*mypy_command, *args])
             report = completed_process.stdout
             errors = completed_process.stderr
             exit_status = completed_process.returncode
@@ -339,7 +359,7 @@ def get_diagnostics(
             # mypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use mypy via api
-            # log.warning("executing mypy args = %s via api", args)
+            log.warning("executing mypy via API: %s", " ".join(args))
             report, errors, exit_status = mypy_api.run(args)
     else:
         # If dmypy daemon is non-responsive calls to run will block.
@@ -352,14 +372,9 @@ def get_diagnostics(
 
         dmypy_args = ["--status-file", dmypy_status_file]
         if dmypy_command:
-            # dmypy exists on PATH or was provided by settings
-            # -> use this dmypy
-            completed_process = subprocess.run(
-                [*dmypy_command,  *dmypy_args, "status"],
-                capture_output=True,
-                **windows_flag,
-                encoding="utf-8",
-            )
+            # dmypy exists on path
+            # -> use dmypy on path
+            completed_process = run_process([dmypy_command, *dmypy_args, "status"])
             errors = completed_process.stderr
             exit_status = completed_process.returncode
             if exit_status != 0:
@@ -368,12 +383,7 @@ def get_diagnostics(
                     exit_status,
                     errors.strip(),
                 )
-                subprocess.run(
-                    ["dmypy", *dmypy_args, "restart"],
-                    capture_output=True,
-                    **windows_flag,
-                    encoding="utf-8",
-                )
+                run_process(["dmypy", *dmypy_args, "restart"])
         else:
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
@@ -393,9 +403,7 @@ def get_diagnostics(
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
             # log.info("dmypy run args = %s via path", args)
-            completed_process = subprocess.run(
-                [*dmypy_command, *args], capture_output=True, **windows_flag, encoding="utf-8"
-            )
+            completed_process = run_process([dmypy_command, *args])
             report = completed_process.stdout
             errors = completed_process.stderr
             exit_status = completed_process.returncode
@@ -422,7 +430,9 @@ def get_diagnostics(
                     "end": {"line": 0, "character": 1000},
                 },
                 "message": errors,
-                "severity": 1 if exit_status != 0 else 2,  # Error if exited with error or warning.
+                "severity": 1
+                if exit_status != 0
+                else 2,  # Error if exited with error or warning.
             }
         )
 
@@ -477,7 +487,10 @@ def init(workspace: str) -> Dict[str, str]:
 
     configuration = {}
     path = findConfigFile(
-        workspace, [], ["pylsp-mypy.cfg", "mypy-ls.cfg", "mypy_ls.cfg", "pyproject.toml"], False
+        workspace,
+        [],
+        ["pylsp-mypy.cfg", "mypy-ls.cfg", "mypy_ls.cfg", "pyproject.toml"],
+        False,
     )
     if path:
         if "pyproject.toml" in path:
@@ -489,7 +502,10 @@ def init(workspace: str) -> Dict[str, str]:
 
     configSubPaths = configuration.get("config_sub_paths", [])
     mypyConfigFile = findConfigFile(
-        workspace, configSubPaths, ["mypy.ini", ".mypy.ini", "pyproject.toml", "setup.cfg"], True
+        workspace,
+        configSubPaths,
+        ["mypy.ini", ".mypy.ini", "pyproject.toml", "setup.cfg"],
+        True,
     )
     mypyConfigFileMap[workspace] = mypyConfigFile
     settingsCache[workspace] = configuration.copy()
