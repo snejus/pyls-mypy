@@ -4,7 +4,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict
 from unittest.mock import Mock, patch
 
 import pytest
@@ -31,7 +30,7 @@ TEST_LINE_NOTE = (
     'test_plugin.py:124:1:129:77: note: Use "-> None" if function does not return a value'
 )
 
-windows_flag: Dict[str, int] = (
+windows_flag: dict[str, int] = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}  # type: ignore
 )
 
@@ -51,7 +50,7 @@ def workspace(tmpdir):
     return ws
 
 
-class FakeConfig(object):
+class FakeConfig:
     def __init__(self, path):
         self._root_path = path
 
@@ -75,10 +74,7 @@ def test_plugin(workspace, last_diagnostics_monkeypatch):
     assert re.fullmatch(TYPE_ERR_MSG_REGEX, diag["message"])
     assert diag["range"]["start"] == {"line": 0, "character": 0}
     # Running mypy in 3.7 produces wrong error ends this can be removed when 3.7 reaches EOL
-    if sys.version_info < (3, 8):
-        assert diag["range"]["end"] == {"line": 0, "character": 1}
-    else:
-        assert diag["range"]["end"] == {"line": 0, "character": 9}
+    assert diag["range"]["end"] == {"line": 0, "character": 9}
     assert diag["severity"] == 1
     assert diag["code"] == "attr-defined"
 
@@ -168,7 +164,6 @@ def test_apply_overrides():
 
 @pytest.mark.skipif(os.name == "nt", reason="Not working on Windows due to test design.")
 def test_option_overrides(tmpdir, last_diagnostics_monkeypatch, workspace):
-    import sys
     from stat import S_IRWXU
     from textwrap import dedent
 
@@ -225,7 +220,7 @@ def test_option_overrides_dmypy(last_diagnostics_monkeypatch, workspace):
         ),
     )
 
-    m = Mock(wraps=lambda a, **_: Mock(returncode=0, **{"stdout": ""}))
+    m = Mock(wraps=lambda a, **_: Mock(returncode=0, stdout=""))
     last_diagnostics_monkeypatch.setattr(plugin.subprocess, "run", m)
 
     document = Document(DOC_URI, workspace, DOC_TYPE_ERR)
@@ -446,7 +441,7 @@ def test_config_overrides_mypy_command(last_diagnostics_monkeypatch, workspace):
         ),
     )
 
-    m = Mock(wraps=lambda a, **_: Mock(returncode=0, **{"stdout": ""}))
+    m = Mock(wraps=lambda a, **_: Mock(returncode=0, stdout=""))
     last_diagnostics_monkeypatch.setattr(plugin.subprocess, "run", m)
 
     document = Document(DOC_URI, workspace, DOC_TYPE_ERR)
@@ -482,7 +477,7 @@ def test_config_overrides_dmypy_command(last_diagnostics_monkeypatch, workspace)
         ),
     )
 
-    m = Mock(wraps=lambda a, **_: Mock(returncode=0, **{"stdout": ""}))
+    m = Mock(wraps=lambda a, **_: Mock(returncode=0, stdout=""))
     last_diagnostics_monkeypatch.setattr(plugin.subprocess, "run", m)
 
     document = Document(DOC_URI, workspace, DOC_TYPE_ERR)

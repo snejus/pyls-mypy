@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 File that contains the python-lsp-server plugin pylsp-mypy.
 
@@ -18,7 +17,7 @@ import subprocess
 from configparser import ConfigParser
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Literal, TypedDict
 
 import psutil
 from typing_extensions import NotRequired
@@ -71,16 +70,16 @@ class Diagnostic(TypedDict):
 
 
 # A mapping from workspace path to config file path
-mypyConfigFileMap: Dict[str, Optional[str]] = {}
+mypyConfigFileMap: dict[str, str | None] = {}
 
-settingsCache: Dict[str, Dict[str, Any]] = {}
+settingsCache: dict[str, dict[str, Any]] = {}
 
 # In non-live-mode the file contents aren't updated.
 # Returning an empty diagnostic clears the diagnostic result,
 # so store a cache of last diagnostics for each file a-la the pylint plugin,
 # so we can return some potentially-stale diagnostics.
 # https://github.com/python-lsp/python-lsp-server/blob/v1.0.1/pylsp/plugins/pylint_lint.py#L55-L62
-last_diagnostics: Dict[tuple[str, str], List[Diagnostic]] = collections.defaultdict(
+last_diagnostics: dict[tuple[str, str], list[Diagnostic]] = collections.defaultdict(
     list
 )
 
@@ -88,7 +87,7 @@ last_diagnostics: Dict[tuple[str, str], List[Diagnostic]] = collections.defaultd
 # This flag prevents that.
 # This flag is new in python 3.7
 # This flag only exists on Windows
-windows_flag: Dict[str, int] = (
+windows_flag: dict[str, int] = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}  # type: ignore
 )
 
@@ -107,7 +106,7 @@ FIND_ATTR_SUFFIX = re.compile(
 FIND_ATTR_PREFIX = re.compile(r'( )?"([^"]+)" undefined').search
 
 
-def parse_line(line: str, document: Document) -> Optional[Diagnostic]:
+def parse_line(line: str, document: Document) -> Diagnostic | None:
     """Return a language-server diagnostic from a line of the Mypy error report.
 
     optionally, use the whole document to provide more context on it.
@@ -122,7 +121,7 @@ def parse_line(line: str, document: Document) -> Optional[Diagnostic]:
 
     Returns
     -------
-    Optional[Dict[str, Any]]
+    Optional[dict[str, Any]]
         The dict with the lint data.
 
     """
@@ -184,7 +183,7 @@ def parse_line(line: str, document: Document) -> Optional[Diagnostic]:
     }
 
 
-def didSettingsChange(workspace: str, settings: Dict[str, Any]) -> None:
+def didSettingsChange(workspace: str, settings: dict[str, Any]) -> None:
     """Handle relevant changes to the settings between runs."""
     configSubPaths = settings.get("config_sub_paths", [])
     if settingsCache[workspace].get("config_sub_paths", []) != configSubPaths:
@@ -213,14 +212,14 @@ def match_exclude_patterns(document_path: str, exclude_patterns: list) -> bool:
     return False
 
 
-def get_cmd(settings: Dict[str, Any], cmd: str) -> List[str]:
+def get_cmd(settings: dict[str, Any], cmd: str) -> list[str]:
     """
     Get the command to run from settings, falling back to searching the PATH.
     If the command is not found in the settings and is not available on the PATH, an
     empty list is returned.
     """
     command_key = f"{cmd}_command"
-    command: List[str] = settings.get(command_key, [])
+    command: list[str] = settings.get(command_key, [])
 
     if not (command and os.getenv("PYLSP_MYPY_ALLOW_DANGEROUS_CODE_EXECUTION")):
         # env var is required to allow command from settings
@@ -240,7 +239,7 @@ def get_cmd(settings: Dict[str, Any], cmd: str) -> List[str]:
 @hookimpl
 def pylsp_lint(
     config: Config, workspace: Workspace, document: Document, is_saved: bool
-) -> List[Diagnostic]:
+) -> list[Diagnostic]:
     """
     Call the linter.
 
@@ -257,7 +256,7 @@ def pylsp_lint(
 
     Returns
     -------
-    List[Dict[str, Any]]
+    list[dict[str, Any]]
         List of the linting data.
 
     """
@@ -309,9 +308,9 @@ def get_diagnostics_key(document: Document) -> tuple[str, str]:
 def get_diagnostics(
     workspace: Workspace,
     document: Document,
-    settings: Dict[str, Any],
+    settings: dict[str, Any],
     is_saved: bool,
-) -> List[Diagnostic]:
+) -> list[Diagnostic]:
     """
     Lints.
 
@@ -326,7 +325,7 @@ def get_diagnostics(
 
     Returns
     -------
-    List[Dict[str, Any]]
+    list[dict[str, Any]]
         List of the linting data.
 
     """
@@ -385,7 +384,7 @@ def get_diagnostics(
             *args,
         ]
 
-        mypy_command: List[str] = get_cmd(settings, "mypy")
+        mypy_command: list[str] = get_cmd(settings, "mypy")
 
         if mypy_command:
             # mypy exists on path
@@ -489,7 +488,7 @@ def get_diagnostics(
 
 
 @hookimpl
-def pylsp_settings(config: Config) -> Dict[str, Dict[str, Dict[str, str]]]:
+def pylsp_settings(config: Config) -> dict[str, dict[str, dict[str, str]]]:
     """
     Read the settings.
 
@@ -500,7 +499,7 @@ def pylsp_settings(config: Config) -> Dict[str, Dict[str, Dict[str, str]]]:
 
     Returns
     -------
-    Dict[str, Dict[str, Dict[str, str]]]
+    dict[str, dict[str, dict[str, str]]]
         The config dict.
 
     """
@@ -508,7 +507,7 @@ def pylsp_settings(config: Config) -> Dict[str, Dict[str, Dict[str, str]]]:
     return {"plugins": {"pylsp_mypy": configuration}}
 
 
-def init(workspace: str) -> Dict[str, str]:
+def init(workspace: str) -> dict[str, str]:
     """
     Find plugin and mypy config files and creates the temp file should it be used.
 
@@ -519,7 +518,7 @@ def init(workspace: str) -> Dict[str, str]:
 
     Returns
     -------
-    Dict[str, str]
+    dict[str, str]
         The plugin config dict.
 
     """
@@ -555,8 +554,8 @@ def init(workspace: str) -> Dict[str, str]:
 
 
 def findConfigFile(
-    path: str, configSubPaths: List[str], names: List[str], mypy: bool
-) -> Optional[str]:
+    path: str, configSubPaths: list[str], names: list[str], mypy: bool
+) -> str | None:
     """
     Search for a config file.
 
@@ -567,9 +566,9 @@ def findConfigFile(
     ----------
     path : str
         The path where the search starts.
-    configSubPaths : List[str]
+    configSubPaths : list[str]
         Additional sub search paths in which mypy configs might be located
-    names : List[str]
+    names : list[str]
         The file to be found (or alternative names).
     mypy : bool
         whether the config file searched is for mypy (plugin otherwise)
@@ -626,9 +625,9 @@ def pylsp_code_actions(
     config: Config,
     workspace: Workspace,
     document: Document,
-    range: Dict,
-    context: Dict,
-) -> List[Dict]:
+    range: dict,
+    context: dict,
+) -> list[dict]:
     """
     Provide code actions to ignore errors.
 
@@ -640,9 +639,9 @@ def pylsp_code_actions(
         Current workspace.
     document : pylsp.workspace.Document
         Document to apply code actions on.
-    range : Dict
+    range : dict
         Range argument given by pylsp.
-    context : Dict
+    context : dict
         CodeActionContext given as dict.
 
     Returns
