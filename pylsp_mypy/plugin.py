@@ -19,9 +19,10 @@ import subprocess
 from configparser import ConfigParser
 from functools import partial
 from pathlib import Path
-from typing import IO, Any, Dict, List, Optional
+from typing import IO, Any, Dict, List, Literal, Optional, TypedDict
 
 import psutil
+from typing_extensions import NotRequired
 
 try:
     import tomllib
@@ -45,6 +46,31 @@ whole_line_pattern = re.compile(  # certain mypy warnings do not report start-en
 
 log = logging.getLogger(__name__)
 
+
+class LineRange(TypedDict):
+    """LineRange TypedDict for mypy diagnostics."""
+
+    line: int
+    character: int
+
+
+class Range(TypedDict):
+    """Range TypedDict for mypy diagnostics."""
+
+    start: LineRange
+    end: LineRange
+
+
+class Diagnostic(TypedDict):
+    """Diagnostic TypedDict for mypy diagnostics."""
+
+    source: Literal["mypy"]
+    range: Range
+    message: str
+    severity: int
+    code: NotRequired[str]
+
+
 # A mapping from workspace path to config file path
 mypyConfigFileMap: Dict[str, Optional[str]] = {}
 
@@ -57,7 +83,9 @@ tmpFile: Optional[IO[bytes]] = None
 # so store a cache of last diagnostics for each file a-la the pylint plugin,
 # so we can return some potentially-stale diagnostics.
 # https://github.com/python-lsp/python-lsp-server/blob/v1.0.1/pylsp/plugins/pylint_lint.py#L55-L62
-last_diagnostics: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
+last_diagnostics: Dict[tuple[str, str], List[Diagnostic]] = collections.defaultdict(
+    list
+)
 
 # Windows started opening opening a cmd-like window for every subprocess call
 # This flag prevents that.
@@ -67,12 +95,23 @@ windows_flag: Dict[str, int] = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}  # type: ignore
 )
 
+_attr_prefixes = [
+    "Skipping analyzing",
+    "Signature of",
+    "Name",
+    "keyword argument",
+    "attribute",
+    "for",
+    "Cannot resolve keyword",
+]
+FIND_ATTR_SUFFIX = re.compile(
+    rf'({"|".join(_attr_prefixes)}) [\'"]([^"\']+)[\'"]'
+).search
+FIND_ATTR_PREFIX = re.compile(r'( )?"([^"]+)" undefined').search
 
-def parse_line(
-    line: str, document: Optional[Document] = None
-) -> Optional[Dict[str, Any]]:
-    """
-    Return a language-server diagnostic from a line of the Mypy error report.
+
+def parse_line(line: str, document: Document) -> Optional[Diagnostic]:
+    """Return a language-server diagnostic from a line of the Mypy error report.
 
     optionally, use the whole document to provide more context on it.
 
@@ -97,54 +136,55 @@ def parse_line(
 
     result = line_match.groupdict()
 
-    global tmpFile
-    file_path = result["file"]
-    if file_path != "<string>":  # live mode
-        # results from other files can be included, but we cannot return
-        # them.
-        if (
-            document
-            and document.path
-            and not document.path.endswith(file_path)
-            and (not tmpFile or not tmpFile.name.endswith(file_path))
-        ):
-            log.warning("discarding result for %s against %s", file_path, document.path)
+    code = result["code"]
+    message = result["message"]
+    if not code and "Revealed" not in message:
+        return None
+
+    severity = result["severity"]
+    if code in {"no-untyped-call", "no-untyped-def", "type-arg"}:
+        severity = "note"
+        if "def test_" in line:
             return None
 
     lineno = int(result["start_line"]) - 1  # 0-based line number
     offset = int(result.get("start_col") or 1) - 1  # 0-based offset
     end_lineno = int(result.get("end_line") or lineno + 1) - 1
     end_offset = int(result.get("end_col") or 1)  # end is exclusive
-    code = result["code"]
-    if not code and "Revealed" not in result["message"]:
-        return None
 
-    severity = result["severity"]
-    if code == "no-untyped-def":
-        severity = "note"
-    elif code in {"no-untyped-call", "no-untyped-def", "type-arg"}:
-        if "def test_" in line:
-            return None
-        severity = "warning"
-    elif code is None:
+    if (
+        code in {None, "misc", "django-manager-missing", "explicit-override"}
+        or (code == "return" and "Missing" in message)
+        or (code == "override" and "incompatible with supertype" in message)
+    ):
         end_lineno = lineno
         end_offset = offset + 1
 
-    diag = {
+    # Heuristic: If the message mentions a quoted symbol (attribute / argument / name),
+    # try to narrow the diagnostic range exactly to that symbol within the original
+    # source slice we already calculated. Improves UX vs highlighting whole line.
+    if matches := FIND_ATTR_SUFFIX(message) or FIND_ATTR_PREFIX(message):
+        type_, prop = matches.groups()
+        for lineno, this_line in enumerate(
+            document.lines[lineno : end_lineno + 1], lineno
+        ):
+            if m := re.search(
+                rf"\.{prop}\b" if type_ == "attribute" else prop, this_line
+            ):
+                offset, end_offset = m.span(0)
+                end_lineno = lineno
+                break
+
+    return {
         "source": "mypy",
         "range": {
             "start": {"line": lineno, "character": offset},
             "end": {"line": end_lineno, "character": end_offset},
         },
-        "message": result["message"],
+        "message": message,
         "severity": {"error": 1, "warning": 2, "note": 3}[severity],
         "code": code,
     }
-
-    if result["code"]:
-        diag["code"] = result["code"]
-
-    return diag
 
 
 def didSettingsChange(workspace: str, settings: Dict[str, Any]) -> None:
@@ -203,7 +243,7 @@ def get_cmd(settings: Dict[str, Any], cmd: str) -> List[str]:
 @hookimpl
 def pylsp_lint(
     config: Config, workspace: Workspace, document: Document, is_saved: bool
-) -> List[Dict[str, Any]]:
+) -> List[Diagnostic]:
     """
     Call the linter.
 
@@ -261,12 +301,18 @@ def pylsp_lint(
         return get_diagnostics(workspace, document, settings, is_saved)
 
 
+def get_diagnostics_key(document: Document) -> tuple[str, str]:
+    root_dir_path = Path().absolute()
+    filepath = Path(document.path).resolve()
+    return str(filepath.relative_to(root_dir_path)), document.source
+
+
 def get_diagnostics(
     workspace: Workspace,
     document: Document,
     settings: Dict[str, Any],
     is_saved: bool,
-) -> List[Dict[str, Any]]:
+) -> List[Diagnostic]:
     """
     Lints.
 
@@ -297,25 +343,35 @@ def get_diagnostics(
     args = ["--show-error-end", "--no-pretty"]
 
     root_dir = str(Path().absolute())
-    if root_dir not in str(Path(document.path).absolute()):
+    try:
+        diagnostics_key = get_diagnostics_key(document)
+    except ValueError:
         return []
 
-    file = document.path
-    if not is_saved and document.path in last_diagnostics:
-        # On-launch the document isn't marked as saved, so fall through and run
-        # the diagnostics anyway even if the file contents may be out of date.
-        log.warning(
-            "non-live, returning cached diagnostics len(cached) = %s",
-            last_diagnostics[document.path],
-        )
-        return last_diagnostics[document.path]
+    file, _ = diagnostics_key
+
+    def get_cached_diagnostics() -> list[Diagnostic]:
+        if diagnostics := last_diagnostics[diagnostics_key]:
+            # On-launch the document isn't marked as saved, so fall through and run
+            # the diagnostics anyway even if the file contents may be out of date.
+            log.warning(
+                "Returning cached diagnostics len(cached) = %s",
+                len(diagnostics),
+            )
+            return diagnostics
+        log.warning("Removing diagnostics")
+        return []
+
+    if not is_saved:
+        log.warning("Unsaved file")
+        return get_cached_diagnostics()
 
     mypyConfigFile = mypyConfigFileMap.get(workspace.root_path)
     if mypyConfigFile:
         args.extend(["--config-file", mypyConfigFile])
 
     if not dmypy:
-        args.append(document.path)
+        args.append(file)
 
     if settings.get("strict", False):
         args.append("--strict")
@@ -398,7 +454,7 @@ def get_diagnostics(
     log.debug("report:\n%s", report)
     log.debug("errors:\n%s", errors)
 
-    diagnostics = []
+    diagnostics: list[Diagnostic] = []
 
     # Expose generic mypy error on the first line.
     if errors:
@@ -411,21 +467,21 @@ def get_diagnostics(
                     "end": {"line": 0, "character": 1000},
                 },
                 "message": errors,
-                "severity": 1
-                if exit_status != 0
-                else 2,  # Error if exited with error or warning.
+                "severity": (
+                    1 if exit_status != 0 else 2
+                ),  # Error if exited with error or warning.
             }
         )
 
     for line in report.splitlines():
-        log.debug("parsing: line = %r", line)
-        diag = parse_line(line, document)
-        if diag:
-            diagnostics.append(diag)
+        if line.startswith(file):
+            log.debug("parsing: line = %r", line)
+            if diag := parse_line(line, document):
+                diagnostics.append(diag)
 
     log.warning("pylsp-mypy len(diagnostics) = %s", len(diagnostics))
 
-    last_diagnostics[document.path] = diagnostics
+    last_diagnostics[diagnostics_key] = diagnostics
     return diagnostics
 
 
@@ -616,7 +672,7 @@ def pylsp_code_actions(
         return actions
 
     # Code actions based on current selected range
-    for diagnostic in last_diagnostics[document.path]:
+    for diagnostic in last_diagnostics[get_diagnostics_key(document)]:
         lineNumberStart = diagnostic["range"]["start"]["line"]
         lineNumberEnd = diagnostic["range"]["end"]["line"]
         rStart = range["start"]["line"]
