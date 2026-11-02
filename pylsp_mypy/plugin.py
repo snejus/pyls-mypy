@@ -16,16 +16,17 @@ import os.path
 import re
 import shutil
 import subprocess
-import tempfile
 from configparser import ConfigParser
 from functools import partial
 from pathlib import Path
 from typing import IO, Any, Dict, List, Optional
 
+import psutil
+
 try:
     import tomllib
 except ModuleNotFoundError:
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[import-not-found]
 
 from mypy import api as mypy_api
 from pylsp import hookimpl
@@ -96,11 +97,17 @@ def parse_line(
 
     result = line_match.groupdict()
 
+    global tmpFile
     file_path = result["file"]
     if file_path != "<string>":  # live mode
         # results from other files can be included, but we cannot return
         # them.
-        if document and document.path and not document.path.endswith(file_path):
+        if (
+            document
+            and document.path
+            and not document.path.endswith(file_path)
+            and (not tmpFile or not tmpFile.name.endswith(file_path))
+        ):
             log.warning("discarding result for %s against %s", file_path, document.path)
             return None
 
@@ -278,41 +285,26 @@ def get_diagnostics(
         List of the linting data.
 
     """
-    log.info(
+    log.warning(
         "lint settings = %s document.path = %s is_saved = %s",
         settings,
         document.path,
         is_saved,
     )
 
-    live_mode = settings.get("live_mode", True)
     dmypy = settings.get("dmypy", False)
-
-    if dmypy and live_mode:
-        # dmypy can only be efficiently run on files that have been saved, see:
-        # https://github.com/python/mypy/issues/9309
-        log.warning("live_mode is not supported with dmypy, disabling")
-        live_mode = False
-
-    if dmypy:
-        dmypy_status_file = settings.get("dmypy_status_file", ".dmypy.json")
 
     args = ["--show-error-end", "--no-pretty"]
 
-    global tmpFile
-    if live_mode and not is_saved:
-        if tmpFile:
-            tmpFile = open(tmpFile.name, "wb")
-        else:
-            tmpFile = tempfile.NamedTemporaryFile("wb", delete=False)
-        log.info("live_mode tmpFile = %s", tmpFile.name)
-        tmpFile.write(bytes(document.source, "utf-8"))
-        tmpFile.close()
-        args.extend(["--shadow-file", document.path, tmpFile.name])
-    elif not is_saved and document.path in last_diagnostics:
+    root_dir = str(Path().absolute())
+    if root_dir not in str(Path(document.path).absolute()):
+        return []
+
+    file = document.path
+    if not is_saved and document.path in last_diagnostics:
         # On-launch the document isn't marked as saved, so fall through and run
         # the diagnostics anyway even if the file contents may be out of date.
-        log.info(
+        log.warning(
             "non-live, returning cached diagnostics len(cached) = %s",
             last_diagnostics[document.path],
         )
@@ -320,10 +312,10 @@ def get_diagnostics(
 
     mypyConfigFile = mypyConfigFileMap.get(workspace.root_path)
     if mypyConfigFile:
-        args.append("--config-file")
-        args.append(mypyConfigFile)
+        args.extend(["--config-file", mypyConfigFile])
 
-    args.append(document.path)
+    if not dmypy:
+        args.append(document.path)
 
     if settings.get("strict", False):
         args.append("--strict")
@@ -331,9 +323,7 @@ def get_diagnostics(
     args.extend(settings.get("overrides", []))
     exit_status = 0
 
-    run_process = partial(
-        subprocess.run, capture_output=True, **windows_flag, encoding="utf-8"
-    )
+    run = partial(subprocess.run, capture_output=True, **windows_flag, encoding="utf-8")
 
     if not dmypy:
         args = [
@@ -351,10 +341,10 @@ def get_diagnostics(
             # mypy exists on path
             # -> use mypy on path
             log.warning("executing mypy on path: %s", " ".join(args))
-            completed_process = run_process([*mypy_command, *args])
-            report = completed_process.stdout
-            errors = completed_process.stderr
-            exit_status = completed_process.returncode
+            response = run([*mypy_command, *args])
+            report = response.stdout
+            errors = response.stderr
+            exit_status = response.returncode
         else:
             # mypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
@@ -368,51 +358,42 @@ def get_diagnostics(
         # If daemon is dead/absent, kill will no-op.
         # In either case, reset to fresh state
 
-        dmypy_command: List[str] = get_cmd(settings, "dmypy")
+        if dmypy_command := get_cmd(settings, "dmypy"):
 
-        dmypy_args = ["--status-file", dmypy_status_file]
-        if dmypy_command:
-            # dmypy exists on path
-            # -> use dmypy on path
-            completed_process = run_process([dmypy_command, *dmypy_args, "status"])
-            errors = completed_process.stderr
-            exit_status = completed_process.returncode
-            if exit_status != 0:
-                log.info(
-                    "restarting dmypy from status: %s message: %s via path",
-                    exit_status,
-                    errors.strip(),
-                )
-                run_process(["dmypy", *dmypy_args, "restart"])
-        else:
-            # dmypy does not exist on PATH and was not provided by settings,
-            # but must exist in the env pylsp-mypy is installed in
-            # -> use dmypy via api
-            _, errors, exit_status = mypy_api.run_dmypy([*dmypy_args, "status"])
-            if exit_status != 0:
-                log.info(
-                    "restarting dmypy from status: %s message: %s via api",
-                    exit_status,
-                    errors.strip(),
-                )
-                mypy_api.run_dmypy([*dmypy_args, "restart"])
+            def run_dmypy(*args, **kwargs) -> tuple[str, str, int]:
+                dmypy_args = [
+                    *dmypy_command,
+                    "--status-file",
+                    settings.get("dmypy_status_file", ".dmypy.json"),
+                    *args,
+                ]
+                log.warning("dmypy run args = %s via path", dmypy_args)
+                result = run(dmypy_args, **kwargs)
+                return result.stdout, result.stderr, result.returncode
 
-        # run to use existing daemon or restart if required
-        args = [*dmypy_args, "run", "--", *args]
-        if dmypy_command:
-            # dmypy exists on PATH or was provided by settings
-            # -> use this dmypy
-            # log.info("dmypy run args = %s via path", args)
-            completed_process = run_process([dmypy_command, *args])
-            report = completed_process.stdout
-            errors = completed_process.stderr
-            exit_status = completed_process.returncode
-        else:
-            # dmypy does not exist on PATH and was not provided by settings,
-            # but must exist in the env pylsp-mypy is installed in
-            # -> use dmypy via api
-            # log.info("dmypy run args = %s via api", args)
-            report, errors, exit_status = mypy_api.run_dmypy(args)
+            @atexit.register
+            def kill_dmypy() -> None:
+                run_dmypy("kill")
+
+            started, checking = False, False
+            for process in psutil.process_iter(["name", "cmdline"]):
+                if process.name() == "dmypy":
+                    cmdline = set(process.cmdline())
+                    if root_dir in cmdline:
+                        started = True
+                    if {
+                        document.path,
+                        tmpFile.name if tmpFile else document.path,
+                    } & cmdline:
+                        checking = True
+
+            if not started:
+                run_dmypy("start", "--", root_dir, *args)
+
+            if not checking:
+                report, errors, exit_status = run_dmypy("check", file)
+                if exit_status > 1:
+                    report, errors, exit_status = run_dmypy("check", file)
 
     log.debug("report:\n%s", report)
     log.debug("errors:\n%s", errors)
@@ -442,7 +423,7 @@ def get_diagnostics(
         if diag:
             diagnostics.append(diag)
 
-    log.info("pylsp-mypy len(diagnostics) = %s", len(diagnostics))
+    log.warning("pylsp-mypy len(diagnostics) = %s", len(diagnostics))
 
     last_diagnostics[document.path] = diagnostics
     return diagnostics
@@ -483,7 +464,7 @@ def init(workspace: str) -> Dict[str, str]:
         The plugin config dict.
 
     """
-    log.info("init workspace = %s", workspace)
+    log.warning("init workspace = %s", workspace)
 
     configuration = {}
     path = findConfigFile(
@@ -510,7 +491,7 @@ def init(workspace: str) -> Dict[str, str]:
     mypyConfigFileMap[workspace] = mypyConfigFile
     settingsCache[workspace] = configuration.copy()
 
-    log.info("mypyConfigFile = %s configuration = %s", mypyConfigFile, configuration)
+    log.warning("mypyConfigFile = %s configuration = %s", mypyConfigFile, configuration)
     return configuration
 
 
