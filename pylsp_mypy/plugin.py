@@ -8,7 +8,6 @@ Created on Fri Jul 10 09:53:57 2020
 """
 
 import ast
-import atexit
 import collections
 import logging
 import os
@@ -19,7 +18,7 @@ import subprocess
 from configparser import ConfigParser
 from functools import partial
 from pathlib import Path
-from typing import IO, Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 import psutil
 from typing_extensions import NotRequired
@@ -75,8 +74,6 @@ class Diagnostic(TypedDict):
 mypyConfigFileMap: Dict[str, Optional[str]] = {}
 
 settingsCache: Dict[str, Dict[str, Any]] = {}
-
-tmpFile: Optional[IO[bytes]] = None
 
 # In non-live-mode the file contents aren't updated.
 # Returning an empty diagnostic clears the diagnostic result,
@@ -331,13 +328,6 @@ def get_diagnostics(
         List of the linting data.
 
     """
-    log.warning(
-        "lint settings = %s document.path = %s is_saved = %s",
-        settings,
-        document.path,
-        is_saved,
-    )
-
     dmypy = settings.get("dmypy", False)
 
     args = ["--show-error-end", "--no-pretty"]
@@ -373,7 +363,7 @@ def get_diagnostics(
     if not dmypy:
         args.append(file)
 
-    if settings.get("strict", False):
+    if settings.get("strict"):
         args.append("--strict")
 
     args.extend(settings.get("overrides", []))
@@ -381,6 +371,8 @@ def get_diagnostics(
 
     run = partial(subprocess.run, capture_output=True, **windows_flag, encoding="utf-8")
 
+    report = ""
+    errors = ""
     if not dmypy:
         args = [
             "--incremental",
@@ -407,49 +399,58 @@ def get_diagnostics(
             # -> use mypy via api
             log.warning("executing mypy via API: %s", " ".join(args))
             report, errors, exit_status = mypy_api.run(args)
-    else:
+    elif dmypy_command := get_cmd(settings, "dmypy"):
         # If dmypy daemon is non-responsive calls to run will block.
         # Check daemon status, if non-zero daemon is dead or hung.
         # If daemon is hung, kill will reset
         # If daemon is dead/absent, kill will no-op.
         # In either case, reset to fresh state
 
-        if dmypy_command := get_cmd(settings, "dmypy"):
+        def run_dmypy(*args, **kwargs) -> tuple[str, str, int]:
+            dmypy_args = [*dmypy_command, *args]
+            log.warning("dmypy run args = %s via path", " ".join(dmypy_args))
+            result = run(dmypy_args, **kwargs)
+            return result.stdout, result.stderr, result.returncode
 
-            def run_dmypy(*args, **kwargs) -> tuple[str, str, int]:
-                dmypy_args = [
-                    *dmypy_command,
-                    "--status-file",
-                    settings.get("dmypy_status_file", ".dmypy.json"),
-                    *args,
-                ]
-                log.warning("dmypy run args = %s via path", dmypy_args)
-                result = run(dmypy_args, **kwargs)
-                return result.stdout, result.stderr, result.returncode
+        started_process = None
+        start_args = ("start", "--", root_dir, *args)
+        log.error("Document path: %s", file)
+        log.error("Root dir: %s", root_dir)
+        for process in psutil.process_iter(["name", "cmdline"]):
+            if process.name() == "dmypy":
+                cmdline = process.cmdline()
+                cmdline_set = set(cmdline)
+                if root_dir in cmdline_set:
+                    if "check" in cmdline_set:
+                        return get_cached_diagnostics()
+                    if started_process:
+                        process.kill()
+                    elif not " ".join(cmdline).endswith(" ".join(start_args)):
+                        log.warning("dmypy configuration changed, killing daemon")
+                        process.kill()
+                    else:
+                        started_process = process
+                if file in cmdline_set:
+                    log.warning("File is already being checked, killing this check")
+                    process.kill()
 
-            @atexit.register
-            def kill_dmypy() -> None:
-                run_dmypy("kill")
+        if not started_process:
+            run_dmypy(*start_args)
 
-            started, checking = False, False
+        def kill_dmypy() -> None:
             for process in psutil.process_iter(["name", "cmdline"]):
-                if process.name() == "dmypy":
-                    cmdline = set(process.cmdline())
-                    if root_dir in cmdline:
-                        started = True
-                    if {
-                        document.path,
-                        tmpFile.name if tmpFile else document.path,
-                    } & cmdline:
-                        checking = True
+                if process.name() == "dmypy" and {root_dir, "check"} & set(
+                    process.cmdline()
+                ):
+                    log.warning("Killing: %s", " ".join(process.cmdline()))
+                    process.kill()
+            Path(".dmypy.json").unlink(missing_ok=True)
 
-            if not started:
-                run_dmypy("start", "--", root_dir, *args)
-
-            if not checking:
-                report, errors, exit_status = run_dmypy("check", file)
-                if exit_status > 1:
-                    report, errors, exit_status = run_dmypy("check", file)
+        report, errors, exit_status = run_dmypy("check", file)
+        if exit_status == 2:
+            kill_dmypy()
+            run_dmypy(*start_args)
+            report, errors, exit_status = run_dmypy("check", file)
 
     log.debug("report:\n%s", report)
     log.debug("errors:\n%s", errors)
@@ -694,17 +695,3 @@ def pylsp_code_actions(
             actions.append(action)
 
     return actions
-
-
-@atexit.register
-def close() -> None:
-    """
-    Deltes the tempFile should it exist.
-
-    Returns
-    -------
-    None.
-
-    """
-    if tmpFile and tmpFile.name:
-        os.unlink(tmpFile.name)
