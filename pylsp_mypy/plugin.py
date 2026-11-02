@@ -292,7 +292,9 @@ def pylsp_lint(
         return []
 
     if settings.get("report_progress", False):
-        with workspace.report_progress("lint: mypy"):
+        with workspace.report_progress(
+            f"lint: mypy {Path(document.path).name}", skip_token_initialization=True
+        ):
             return get_diagnostics(workspace, document, settings, is_saved)
     else:
         return get_diagnostics(workspace, document, settings, is_saved)
@@ -586,7 +588,7 @@ def findConfigFile(
                 if file.is_file():
                     if file.name in ["mypy-ls.cfg", "mypy_ls.cfg"]:
                         raise NameError(
-                            f"{str(file)}: {file.name} is no longer supported, you should rename "
+                            f"{file!s}: {file.name} is no longer supported, you should rename "
                             "your config file to pylsp-mypy.cfg or preferably use a pyproject.toml "
                             "instead."
                         )
